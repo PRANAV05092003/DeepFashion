@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Virtual Try-On</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .drag-area {
+            border: 2px dashed #4a5568;
+            transition: all 0.3s ease;
+        }
+        .drag-area.active {
+            border-color: #4299e1;
+            background-color: #ebf8ff;
+        }
+        .preview-image {
+            max-width: 100%;
+            max-height: 300px;
+            object-fit: contain;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <header class="text-center mb-12">
+            <h1 class="text-4xl font-bold text-gray-800 mb-4">AI Virtual Try-On</h1>
+            <p class="text-gray-600">Experience the future of fashion shopping with our advanced AI-powered virtual try-on technology</p>
+        </header>
+
+        <!-- System Status -->
+        <div class="mb-8 bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold mb-4">System Status</h2>
+            <div class="space-y-2">
+                <div class="flex items-center">
+                    <i class="fas fa-circle {% if status.system_ready %}text-green-500{% else %}text-red-500{% endif %} mr-2"></i>
+                    <span class="font-medium">System Status:</span>
+                    <span class="ml-2">{% if status.system_ready %}Ready{% else %}Not Ready{% endif %}</span>
+                </div>
+                <div class="text-sm text-gray-600">
+                    <p>{{ status.dependencies }}</p>
+                    <p>{{ status.model_files }}</p>
+                </div>
+            </div>
+        </div>
+
+        {% if status.system_ready %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+            <!-- Person Image Upload -->
+            <div class="bg-white rounded-lg shadow-lg p-6">
+                <h2 class="text-xl font-semibold mb-4">Upload Person Image</h2>
+                <div class="drag-area p-8 text-center rounded-lg cursor-pointer" id="personDragArea">
+                    <i class="fas fa-user-circle text-4xl text-gray-400 mb-4"></i>
+                    <p class="text-gray-600">Drag & drop your image here or click to browse</p>
+                    <input type="file" id="personInput" class="hidden" accept="image/*">
+                </div>
+                <div id="personPreview" class="mt-4 hidden">
+                    <img src="" alt="Person Preview" class="preview-image mx-auto">
+                </div>
+            </div>
+
+            <!-- Clothing Image Upload -->
+            <div class="bg-white rounded-lg shadow-lg p-6">
+                <h2 class="text-xl font-semibold mb-4">Upload Clothing Image</h2>
+                <div class="drag-area p-8 text-center rounded-lg cursor-pointer" id="clothingDragArea">
+                    <i class="fas fa-tshirt text-4xl text-gray-400 mb-4"></i>
+                    <p class="text-gray-600">Drag & drop clothing image here or click to browse</p>
+                    <input type="file" id="clothingInput" class="hidden" accept="image/*">
+                </div>
+                <div id="clothingPreview" class="mt-4 hidden">
+                    <img src="" alt="Clothing Preview" class="preview-image mx-auto">
+                </div>
+            </div>
+        </div>
+
+        <!-- Result Section -->
+        <div class="mt-8 bg-white rounded-lg shadow-lg p-6">
+            <h2 class="text-xl font-semibold mb-4">Try-On Result</h2>
+            <div id="resultContainer" class="hidden">
+                <img src="" alt="Try-On Result" class="preview-image mx-auto">
+                <div class="mt-4 flex justify-center space-x-4">
+                    <button class="bg-blue-500 text-white px-6 py-2 rounded-lg hover:bg-blue-600 transition-colors" id="downloadBtn">
+                        <i class="fas fa-download mr-2"></i>Download
+                    </button>
+                    <button class="bg-green-500 text-white px-6 py-2 rounded-lg hover:bg-green-600 transition-colors" id="shareBtn">
+                        <i class="fas fa-share-alt mr-2"></i>Share
+                    </button>
+                </div>
+            </div>
+            <div id="loadingSpinner" class="hidden text-center py-8">
+                <i class="fas fa-spinner fa-spin text-4xl text-blue-500"></i>
+                <p class="mt-4 text-gray-600">Processing your images...</p>
+            </div>
+            <div id="errorMessage" class="hidden text-center py-8 text-red-500">
+            </div>
+        </div>
+        {% else %}
+        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative" role="alert">
+            <strong class="font-bold">System Not Ready!</strong>
+            <p class="block sm:inline">Please check the system status above and ensure all dependencies and model files are properly installed.</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        // Drag and drop functionality
+        const dragAreas = document.querySelectorAll('.drag-area');
+        const inputs = document.querySelectorAll('input[type="file"]');
+        const previews = document.querySelectorAll('[id$="Preview"]');
+        const resultContainer = document.getElementById('resultContainer');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+        const errorMessage = document.getElementById('errorMessage');
+
+        dragAreas.forEach((area, index) => {
+            area.addEventListener('click', () => inputs[index].click());
+            area.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                area.classList.add('active');
+            });
+            area.addEventListener('dragleave', () => area.classList.remove('active'));
+            area.addEventListener('drop', (e) => {
+                e.preventDefault();
+                area.classList.remove('active');
+                const file = e.dataTransfer.files[0];
+                if (file && file.type.startsWith('image/')) {
+                    handleFile(file, index);
+                }
+            });
+        });
+
+        inputs.forEach((input, index) => {
+            input.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) handleFile(file, index);
+            });
+        });
+
+        function handleFile(file, index) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                previews[index].querySelector('img').src = e.target.result;
+                previews[index].classList.remove('hidden');
+                checkAndProcess();
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function checkAndProcess() {
+            if (previews[0].classList.contains('hidden') || previews[1].classList.contains('hidden')) {
+                return;
+            }
+
+            loadingSpinner.classList.remove('hidden');
+            resultContainer.classList.add('hidden');
+            errorMessage.classList.add('hidden');
+
+            const formData = new FormData();
+            formData.append('person_image', inputs[0].files[0]);
+            formData.append('clothing_image', inputs[1].files[0]);
+
+            fetch('/try-on', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    resultContainer.querySelector('img').src = data.result;
+                    resultContainer.classList.remove('hidden');
+                } else {
+                    throw new Error(data.error || 'Failed to process images');
+                }
+            })
+            .catch(error => {
+                errorMessage.textContent = error.message;
+                errorMessage.classList.remove('hidden');
+            })
+            .finally(() => {
+                loadingSpinner.classList.add('hidden');
+            });
+        }
+
+        // Download and Share functionality
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = 'virtual-tryon-result.jpg';
+            link.href = resultContainer.querySelector('img').src;
+            link.click();
+        });
+
+        document.getElementById('shareBtn').addEventListener('click', () => {
+            if (navigator.share) {
+                navigator.share({
+                    title: 'My Virtual Try-On Result',
+                    text: 'Check out my virtual try-on result!',
+                    url: resultContainer.querySelector('img').src
+                });
+            } else {
+                alert('Sharing is not supported on this browser');
+            }
+        });
+
+        // Check system status periodically
+        function checkSystemStatus() {
+            fetch('/status')
+                .then(response => response.json())
+                .then(status => {
+                    const statusIndicator = document.querySelector('.fa-circle');
+                    if (status.system_ready) {
+                        statusIndicator.classList.remove('text-red-500');
+                        statusIndicator.classList.add('text-green-500');
+                    } else {
+                        statusIndicator.classList.remove('text-green-500');
+                        statusIndicator.classList.add('text-red-500');
+                    }
+                });
+        }
+
+        // Check status every 30 seconds
+        setInterval(checkSystemStatus, 30000);
+    </script>
+</body>
+</html> 

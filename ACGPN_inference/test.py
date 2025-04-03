@@ -10,9 +10,13 @@ import torch
 from torch.autograd import Variable
 from tensorboardX import SummaryWriter
 import cv2
+from PIL import Image
+import torchvision.transforms as transforms
+
 writer = SummaryWriter('runs/G1G2')
 SIZE=320
 NC=14
+
 def generate_label_plain(inputs):
     size = inputs.size()
     pred_batch = []
@@ -27,7 +31,7 @@ def generate_label_plain(inputs):
 
     return label_batch
 
-def generate_label_color(inputs):
+def generate_label_color(inputs, opt):
     label_batch = []
     for i in range(len(inputs)):
         label_batch.append(util.tensor2label(inputs[i], opt.label_nc))
@@ -36,6 +40,7 @@ def generate_label_color(inputs):
     input_label = torch.from_numpy(label_batch)
 
     return input_label
+
 def complete_compose(img,mask,label):
     label=label.cpu().numpy()
     M_f=label>0
@@ -47,14 +52,13 @@ def complete_compose(img,mask,label):
     return masked_img,M_c,M_f
 
 def compose(label,mask,color_mask,edge,color,noise):
-    # check=check>0
-    # print(check)
     masked_label=label*(1-mask)
     masked_edge=mask*edge
     masked_color_strokes=mask*(1-color_mask)*color
     masked_noise=mask*noise
     return masked_label,masked_edge,masked_color_strokes,masked_noise
-def changearm(old_label):
+
+def changearm(old_label, data):
     label=old_label
     arm1=torch.FloatTensor((data['label'].cpu().numpy()==11).astype(np.int))
     arm2=torch.FloatTensor((data['label'].cpu().numpy()==13).astype(np.int))
@@ -63,144 +67,184 @@ def changearm(old_label):
     label=label*(1-arm2)+arm2*4
     label=label*(1-noise)+noise*4
     return label
-os.makedirs('sample',exist_ok=True)
-opt = TrainOptions().parse()
-iter_path = os.path.join(opt.checkpoints_dir, opt.name, 'iter.txt')
-if opt.continue_train:
+
+def generate_try_on(person_path, clothing_path):
+    """Generate try-on result for a single person and clothing image"""
     try:
-        start_epoch, epoch_iter = np.loadtxt(iter_path , delimiter=',', dtype=int)
-    except:
-        start_epoch, epoch_iter = 1, 0
-    print('Resuming from epoch %d at iteration %d' % (start_epoch, epoch_iter))        
-else:    
-    start_epoch, epoch_iter = 1, 0
-
-if opt.debug:
-    opt.display_freq = 1
-    opt.print_freq = 1
-    opt.niter = 1
-    opt.niter_decay = 0
-    opt.max_dataset_size = 10
-
-data_loader = CreateDataLoader(opt)
-dataset = data_loader.load_data()
-dataset_size = len(data_loader)
-print('# Inference images = %d' % dataset_size)
-
-model = create_model(opt)
-
-total_steps = (start_epoch-1) * dataset_size + epoch_iter
-
-display_delta = total_steps % opt.display_freq
-print_delta = total_steps % opt.print_freq
-save_delta = total_steps % opt.save_latest_freq
-
-step = 0
-
-for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
-    epoch_start_time = time.time()
-    if epoch != start_epoch:
-        epoch_iter = epoch_iter % dataset_size
-    for i, data in enumerate(dataset, start=epoch_iter):
-
-
-
-        iter_start_time = time.time()
-        total_steps += opt.batchSize
-        epoch_iter += opt.batchSize
-
-        # whether to collect output images
-        #save_fake = total_steps % opt.display_freq == display_delta
-        save_fake = True
-
-        ##add gaussian noise channel
-        ## wash the label
-        t_mask = torch.FloatTensor((data['label'].cpu().numpy() == 7).astype(np.float))
-        #
-        # data['label'] = data['label'] * (1 - t_mask) + t_mask * 4
-        mask_clothes = torch.FloatTensor((data['label'].cpu().numpy() == 4).astype(np.int))
-        mask_fore = torch.FloatTensor((data['label'].cpu().numpy() > 0).astype(np.int))
-        img_fore = data['image'] * mask_fore
-        img_fore_wc = img_fore * mask_fore
-        all_clothes_label = changearm(data['label'])
-
-
-
-        ############## Forward Pass ######################
-        losses, fake_image, real_image, input_label,L1_loss,style_loss,clothes_mask,CE_loss,rgb,alpha= model(Variable(data['label'].cuda()),Variable(data['edge'].cuda()),Variable(img_fore.cuda()),Variable(mask_clothes.cuda())
-                                                                                                    ,Variable(data['color'].cuda()),Variable(all_clothes_label.cuda()),Variable(data['image'].cuda()),Variable(data['pose'].cuda()) ,Variable(data['image'].cuda()) ,Variable(mask_fore.cuda()))
-
-        # sum per device losses
-        losses = [ torch.mean(x) if not isinstance(x, int) else x for x in losses ]
-        loss_dict = dict(zip(model.module.loss_names, losses))
-
-        # calculate final loss scalar
-        loss_D = (loss_dict['D_fake'] + loss_dict['D_real']) * 0.5
-        loss_G = loss_dict['G_GAN']+torch.mean(CE_loss)#loss_dict.get('G_GAN_Feat',0)+torch.mean(L1_loss)+loss_dict.get('G_VGG',0)
-
-        writer.add_scalar('loss_d', loss_D, step)
-        writer.add_scalar('loss_g', loss_G, step)
-        # writer.add_scalar('loss_L1', torch.mean(L1_loss), step)
-
-        writer.add_scalar('loss_CE', torch.mean(CE_loss), step)
-        # writer.add_scalar('acc', torch.mean(acc)*100, step)
-        # writer.add_scalar('loss_face', torch.mean(face_loss), step)
-        # writer.add_scalar('loss_fore', torch.mean(fore_loss), step)
-        # writer.add_scalar('loss_tv', torch.mean(tv_loss), step)
-        # writer.add_scalar('loss_mask', torch.mean(mask_loss), step)
-        # writer.add_scalar('loss_style', torch.mean(style_loss), step)
-
-
-        writer.add_scalar('loss_g_gan', loss_dict['G_GAN'], step)
-        # writer.add_scalar('loss_g_gan_feat', loss_dict['G_GAN_Feat'], step)
-        # writer.add_scalar('loss_g_vgg', loss_dict['G_VGG'], step)
-  
-        ############### Backward Pass ####################
-        # update generator weights
-        # model.module.optimizer_G.zero_grad()
-        # loss_G.backward()
-        # model.module.optimizer_G.step()
-        #
-        # # update discriminator weights
-        # model.module.optimizer_D.zero_grad()
-        # loss_D.backward()
-        # model.module.optimizer_D.step()
-
-        #call(["nvidia-smi", "--format=csv", "--query-gpu=memory.used,memory.free"]) 
-
-        ############## Display results and errors ##########
-
+        # Initialize model and options
+        opt = TrainOptions().parse()
+        model = create_model(opt)
         
-        ### display output images
-        a = generate_label_color(generate_label_plain(input_label)).float().cuda()
-        b = real_image.float().cuda()
-        c = fake_image.float().cuda()
-        d=torch.cat([clothes_mask,clothes_mask,clothes_mask],1)
-        combine = torch.cat([a[0],d[0],b[0],c[0],rgb[0]], 2).squeeze()
-        # combine=c[0].squeeze()
-        cv_img=(combine.permute(1,2,0).detach().cpu().numpy()+1)/2
-        if step % 1 == 0:
-            writer.add_image('combine', (combine.data + 1) / 2.0, step)
-            rgb=(cv_img*255).astype(np.uint8)
-            bgr=cv2.cvtColor(rgb,cv2.COLOR_RGB2BGR)
-            n=str(step)+'.jpg'
-            cv2.imwrite('sample/'+data['name'][0],bgr)
-        step += 1
-        print(step)
-        ### save latest model
-        if total_steps % opt.save_latest_freq == save_delta:
-            # print('saving the latest model (epoch %d, total_steps %d)' % (epoch, total_steps))
-            # model.module.save('latest')
-            # np.savetxt(iter_path, (epoch, epoch_iter), delimiter=',', fmt='%d')
-            pass
-        if epoch_iter >= dataset_size:
-            break
-       
-    # end of epoch 
-    iter_end_time = time.time()
-    print('End of epoch %d / %d \t Time Taken: %d sec' %
-          (epoch, opt.niter + opt.niter_decay, time.time() - epoch_start_time))
-    break
+        # Create sample directory
+        os.makedirs('sample', exist_ok=True)
+        
+        # Load and preprocess images
+        person_img = Image.open(person_path).convert('RGB')
+        clothing_img = Image.open(clothing_path).convert('RGB')
+        
+        # Resize images
+        person_img = person_img.resize((256, 192))
+        clothing_img = clothing_img.resize((256, 192))
+        
+        # Convert to tensors
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        ])
+        
+        person_tensor = transform(person_img).unsqueeze(0)
+        clothing_tensor = transform(clothing_img).unsqueeze(0)
+        
+        # Move to GPU if available
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        person_tensor = person_tensor.to(device)
+        clothing_tensor = clothing_tensor.to(device)
+        
+        # Generate masks
+        mask_clothes = torch.FloatTensor((person_tensor.cpu().numpy() > 0).astype(np.int))
+        mask_fore = torch.FloatTensor((person_tensor.cpu().numpy() > 0).astype(np.int))
+        img_fore = person_tensor * mask_fore
+        img_fore_wc = img_fore * mask_fore
+        
+        # Create data dictionary
+        data = {
+            'label': person_tensor,
+            'edge': clothing_tensor,
+            'image': person_tensor,
+            'color': clothing_tensor,
+            'pose': person_tensor,
+            'name': [os.path.basename(person_path)]
+        }
+        
+        # Generate try-on result
+        with torch.no_grad():
+            losses, fake_image, real_image, input_label, L1_loss, style_loss, clothes_mask, CE_loss, rgb, alpha = model(
+                Variable(person_tensor.cuda()),
+                Variable(clothing_tensor.cuda()),
+                Variable(img_fore.cuda()),
+                Variable(mask_clothes.cuda()),
+                Variable(clothing_tensor.cuda()),
+                Variable(changearm(person_tensor, data).cuda()),
+                Variable(person_tensor.cuda()),
+                Variable(person_tensor.cuda()),
+                Variable(person_tensor.cuda()),
+                Variable(mask_fore.cuda())
+            )
+        
+        # Process result
+        result = fake_image[0].cpu().numpy()
+        result = (result + 1) / 2.0  # Denormalize
+        result = (result * 255).astype(np.uint8)
+        
+        # Save result
+        result_path = os.path.join('sample', f'result_{int(time.time())}.jpg')
+        cv2.imwrite(result_path, cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        
+        return result_path
+        
+    except Exception as e:
+        print(f"Error in generate_try_on: {str(e)}")
+        return None
+
+# Main training loop
+if __name__ == '__main__':
+    opt = TrainOptions().parse()
+    iter_path = os.path.join(opt.checkpoints_dir, opt.name, 'iter.txt')
+    
+    if opt.continue_train:
+        try:
+            start_epoch, epoch_iter = np.loadtxt(iter_path, delimiter=',', dtype=int)
+        except:
+            start_epoch, epoch_iter = 1, 0
+        print('Resuming from epoch %d at iteration %d' % (start_epoch, epoch_iter))        
+    else:    
+        start_epoch, epoch_iter = 1, 0
+
+    if opt.debug:
+        opt.display_freq = 1
+        opt.print_freq = 1
+        opt.niter = 1
+        opt.niter_decay = 0
+        opt.max_dataset_size = 10
+
+    data_loader = CreateDataLoader(opt)
+    dataset = data_loader.load_data()
+    dataset_size = len(data_loader)
+    print('# Inference images = %d' % dataset_size)
+
+    model = create_model(opt)
+    total_steps = (start_epoch-1) * dataset_size + epoch_iter
+    step = 0
+
+    for epoch in range(start_epoch, opt.niter + opt.niter_decay + 1):
+        epoch_start_time = time.time()
+        if epoch != start_epoch:
+            epoch_iter = epoch_iter % dataset_size
+            
+        for i, data in enumerate(dataset, start=epoch_iter):
+            iter_start_time = time.time()
+            total_steps += opt.batchSize
+            epoch_iter += opt.batchSize
+
+            # Process batch
+            t_mask = torch.FloatTensor((data['label'].cpu().numpy() == 7).astype(np.float))
+            mask_clothes = torch.FloatTensor((data['label'].cpu().numpy() == 4).astype(np.int))
+            mask_fore = torch.FloatTensor((data['label'].cpu().numpy() > 0).astype(np.int))
+            img_fore = data['image'] * mask_fore
+            img_fore_wc = img_fore * mask_fore
+            all_clothes_label = changearm(data['label'], data)
+
+            # Forward pass
+            losses, fake_image, real_image, input_label, L1_loss, style_loss, clothes_mask, CE_loss, rgb, alpha = model(
+                Variable(data['label'].cuda()),
+                Variable(data['edge'].cuda()),
+                Variable(img_fore.cuda()),
+                Variable(mask_clothes.cuda()),
+                Variable(data['color'].cuda()),
+                Variable(all_clothes_label.cuda()),
+                Variable(data['image'].cuda()),
+                Variable(data['pose'].cuda()),
+                Variable(data['image'].cuda()),
+                Variable(mask_fore.cuda())
+            )
+
+            # Process results
+            losses = [torch.mean(x) if not isinstance(x, int) else x for x in losses]
+            loss_dict = dict(zip(model.module.loss_names, losses))
+            loss_D = (loss_dict['D_fake'] + loss_dict['D_real']) * 0.5
+            loss_G = loss_dict['G_GAN'] + torch.mean(CE_loss)
+
+            # Log results
+            writer.add_scalar('loss_d', loss_D, step)
+            writer.add_scalar('loss_g', loss_G, step)
+            writer.add_scalar('loss_CE', torch.mean(CE_loss), step)
+            writer.add_scalar('loss_g_gan', loss_dict['G_GAN'], step)
+
+            # Save results
+            a = generate_label_color(generate_label_plain(input_label), opt).float().cuda()
+            b = real_image.float().cuda()
+            c = fake_image.float().cuda()
+            d = torch.cat([clothes_mask, clothes_mask, clothes_mask], 1)
+            combine = torch.cat([a[0], d[0], b[0], c[0], rgb[0]], 2).squeeze()
+            cv_img = (combine.permute(1,2,0).detach().cpu().numpy()+1)/2
+
+            if step % 1 == 0:
+                writer.add_image('combine', (combine.data + 1) / 2.0, step)
+                rgb = (cv_img*255).astype(np.uint8)
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                cv2.imwrite('sample/'+data['name'][0], bgr)
+
+            step += 1
+            print(step)
+
+            if epoch_iter >= dataset_size:
+                break
+
+        # End of epoch
+        iter_end_time = time.time()
+        print('End of epoch %d / %d \t Time Taken: %d sec' %
+              (epoch, opt.niter + opt.niter_decay, time.time() - epoch_start_time))
+        break
 
     ### save model for this epoch
     if epoch % opt.save_epoch_freq == 0:
